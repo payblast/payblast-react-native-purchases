@@ -1,4 +1,4 @@
-# react-native-purchases
+# payblast-react-native-purchases
 
 Payblast React Native purchases SDK
 
