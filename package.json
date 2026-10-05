@@ -1,6 +1,6 @@
 {
   "name": "payblast-react-native-purchases",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "main": "src/index.js",
   "exports": {
@@ -8,5 +8,13 @@
   },
   "scripts": {
     "test": "node --test"
+  },
+  "peerDependencies": {
+    "react-native": ">=0.73"
+  },
+  "peerDependenciesMeta": {
+    "react-native": {
+      "optional": true
+    }
   }
 }

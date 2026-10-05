@@ -1,3 +1,5 @@
+import { loadNativePurchases, storeFromNative } from "./native.js";
+
 export const PURCHASES_ERROR_CODE = {
   PURCHASE_CANCELLED_ERROR: "PURCHASE_CANCELLED_ERROR",
   PURCHASE_NOT_ALLOWED_ERROR: "PURCHASE_NOT_ALLOWED_ERROR",
@@ -73,6 +75,7 @@ export function createClient({
   platform = detectPlatform(),
   purchaseStoreProduct = null,
   restoreStore = null,
+  nativeModule,
 } = {}) {
   let apiKey = null;
   let appUserId = null;
@@ -118,6 +121,12 @@ export function createClient({
   async function fetchCustomer() {
     const body = await request(`/v1/customers/${encodeURIComponent(appUserId)}`);
     return toCustomer(body);
+  }
+
+  function resolveStore() {
+    if (purchaseStoreProduct) return { purchaseStoreProduct, restoreStore };
+    const linked = nativeModule === undefined ? loadNativePurchases() : nativeModule;
+    return storeFromNative(linked);
   }
 
   return {
@@ -173,25 +182,32 @@ export function createClient({
           body: JSON.stringify({ product_identifier: productIdentifier, app_user_id: appUserId }),
         });
         transaction = { transactionIdentifier: session.id, checkoutUrl: session.url };
-      } else if (purchaseStoreProduct) {
+      } else {
+        const store = resolveStore();
+        if (!store?.purchaseStoreProduct) {
+          throw new PurchasesError(
+            "Rebuild the iOS and Android app after installing payblast-react-native-purchases. That compiles the package's StoreKit and Play Billing code. Expo Go cannot make store purchases.",
+            PURCHASES_ERROR_CODE.PURCHASE_NOT_ALLOWED_ERROR,
+          );
+        }
+
         try {
-          const storeResult = await purchaseStoreProduct({ productIdentifier, package: aPackage, appUserId });
+          const storeResult = await store.purchaseStoreProduct({ productIdentifier, package: aPackage, appUserId });
           if (storeResult?.userCancelled) {
             throw new PurchasesError("Purchase was cancelled.", PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR);
           }
           transaction = { transactionIdentifier: storeResult?.transactionIdentifier || productIdentifier };
         } catch (error) {
           if (error instanceof PurchasesError) throw error;
-          if (error?.code === PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR || error?.userCancelled) {
+          if (
+            error?.code === PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR ||
+            error?.code === "cancelled" ||
+            error?.userCancelled
+          ) {
             throw new PurchasesError(error.message || "Purchase was cancelled.", PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR);
           }
           throw new PurchasesError(error.message || "Store purchase failed", PURCHASES_ERROR_CODE.STORE_PROBLEM_ERROR);
         }
-      } else {
-        throw new PurchasesError(
-          "Pass purchaseStoreProduct to Purchases.configure. iOS and Android purchases go through StoreKit or Play Billing. Payblast confirms them from store notifications.",
-          PURCHASES_ERROR_CODE.PURCHASE_NOT_ALLOWED_ERROR,
-        );
       }
 
       const customer = await fetchCustomer();
@@ -205,7 +221,8 @@ export function createClient({
       return this.purchase(aPackage);
     },
     async restorePurchases() {
-      if (restoreStore) await restoreStore({ appUserId });
+      const store = resolveStore();
+      if (store?.restoreStore) await store.restoreStore({ appUserId });
       const customer = await fetchCustomer();
       notify(customer);
       return customer;

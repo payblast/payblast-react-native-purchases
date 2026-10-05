@@ -142,6 +142,42 @@ test("web purchase opens Stripe Checkout", async () => {
   assert.equal(result.productIdentifier, "price_yearly");
 });
 
+test("ios purchase uses the linked store module", async () => {
+  const purchased = [];
+  const purchases = createClient({
+    fetchImpl: async () => json({ app_user_id: "user-1", entitlements: {} }),
+    platform: "ios",
+    nativeModule: {
+      purchase: async (productId, appUserId) => {
+        purchased.push({ productId, appUserId });
+        return { transactionIdentifier: "1000001" };
+      },
+      restore: async () => ({ productIdentifiers: ["verbs_monthly"] }),
+    },
+  });
+  await purchases.configure({ apiKey: "pk_test", appUserID: "user-1" });
+  const result = await purchases.purchase({ identifier: "monthly", products: { ios: "verbs_monthly" } });
+  assert.deepEqual(purchased, [{ productId: "verbs_monthly", appUserId: "user-1" }]);
+  assert.equal(result.transaction.transactionIdentifier, "1000001");
+  await purchases.restorePurchases();
+});
+
+test("a missing store module asks for a rebuild", async () => {
+  const purchases = createClient({
+    fetchImpl: async () => json({}),
+    platform: "android",
+    nativeModule: null,
+  });
+  await purchases.configure({ apiKey: "pk_test", appUserID: "user-1" });
+  await assert.rejects(
+    () => purchases.purchase({ identifier: "monthly", products: { android: "play_monthly" } }),
+    (error) =>
+      error instanceof PurchasesError &&
+      error.code === PURCHASES_ERROR_CODE.PURCHASE_NOT_ALLOWED_ERROR &&
+      /Rebuild/.test(error.message),
+  );
+});
+
 test("configure rejects a missing api key", async () => {
   const purchases = createClient({ fetchImpl: async () => json({}) });
   await assert.rejects(

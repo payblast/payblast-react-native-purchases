@@ -6,12 +6,6 @@ export async function setup(appUserID) {
   await Purchases.configure({
     apiKey: "pk_live_your_public_key",
     appUserID,
-    platform: "ios",
-    purchaseStoreProduct: async ({ productIdentifier }) => {
-      // Finish the StoreKit or Play Billing purchase here, then return.
-      // Payblast grants the entitlement from the store notification, not from this return value.
-      return { transactionIdentifier: productIdentifier };
-    },
   });
 }
 
