@@ -25,15 +25,20 @@ export async function loadPackages() {
 
 export async function buy(aPackage) {
   try {
-    const { customerInfo } = await Purchases.purchasePackage(aPackage);
-    return typeof customerInfo.entitlements.active[ENTITLEMENT_ID] !== "undefined";
+    const { customer } = await Purchases.purchase(aPackage);
+    return typeof customer.entitlements.active[ENTITLEMENT_ID] !== "undefined";
   } catch (error) {
     if (error.code === Purchases.PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR) return false;
     throw error;
   }
 }
 
+export async function subscribe(aPackage) {
+  const { customer } = await Purchases.subscribe(aPackage);
+  return customer;
+}
+
 export async function hasAccess() {
-  const customerInfo = await Purchases.getCustomerInfo();
-  return typeof customerInfo.entitlements.active[ENTITLEMENT_ID] !== "undefined";
+  const customer = await Purchases.getCustomer();
+  return typeof customer.entitlements.active[ENTITLEMENT_ID] !== "undefined";
 }

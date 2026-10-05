@@ -35,10 +35,11 @@ export function createPurchases(native) {
     },
     async purchase(pkg) {
       const result = await native.purchase(pkg);
-      for (const listener of listeners) listener(result.customerInfo);
-      return result;
+      const customer = result.customer || result.customerInfo;
+      for (const listener of listeners) listener(customer);
+      return { ...result, customer };
     },
-    purchasePackage(pkg) {
+    subscribe(pkg) {
       return this.purchase(pkg);
     },
     restore() {
@@ -47,15 +48,21 @@ export function createPurchases(native) {
     restorePurchases() {
       return native.restore();
     },
+    getCustomer() {
+      return native.getCustomer ? native.getCustomer() : native.getCustomerInfo();
+    },
     getCustomerInfo() {
-      return native.getCustomerInfo();
+      return this.getCustomer();
     },
     presentPaywall(_document, packages) {
       return (packages || []).map((pkg) => pkg.lookup_key || pkg.identifier).join(" ");
     },
-    addCustomerInfoUpdateListener(listener) {
+    addCustomerUpdateListener(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    addCustomerInfoUpdateListener(listener) {
+      return this.addCustomerUpdateListener(listener);
     },
   };
 }
@@ -71,8 +78,8 @@ export function createClient({
   let appUserId = null;
   const listeners = new Set();
 
-  function notify(customerInfo) {
-    for (const listener of listeners) listener(customerInfo);
+  function notify(customer) {
+    for (const listener of listeners) listener(customer);
   }
 
   async function request(path, options = {}) {
@@ -108,9 +115,9 @@ export function createClient({
     return response.json();
   }
 
-  async function customerInfo() {
+  async function fetchCustomer() {
     const body = await request(`/v1/customers/${encodeURIComponent(appUserId)}`);
-    return toCustomerInfo(body);
+    return toCustomer(body);
   }
 
   return {
@@ -134,21 +141,21 @@ export function createClient({
       });
       const created = appUserId.startsWith("$payblastAnon");
       appUserId = nextAppUserId;
-      const info = toCustomerInfo(body);
-      notify(info);
-      return { customerInfo: info, created };
+      const customer = toCustomer(body);
+      notify(customer);
+      return { customer, created };
     },
     async logOut() {
       appUserId = anonymousId();
-      const info = await customerInfo();
-      notify(info);
-      return info;
+      const customer = await fetchCustomer();
+      notify(customer);
+      return customer;
     },
     async getOfferings() {
       const body = await request("/v1/offerings");
       return toOfferings(body, platform);
     },
-    async purchasePackage(aPackage) {
+    async purchase(aPackage) {
       const productIdentifier = productIdFor(aPackage, platform);
 
       if (!productIdentifier) {
@@ -187,36 +194,48 @@ export function createClient({
         );
       }
 
-      const info = await customerInfo();
-      notify(info);
-      return { customerInfo: info, productIdentifier, transaction };
+      const customer = await fetchCustomer();
+      notify(customer);
+      return { customer, productIdentifier, transaction };
     },
-    async purchase(pkg) {
-      return this.purchasePackage(pkg);
+    subscribe(aPackage) {
+      return this.purchase(aPackage);
+    },
+    purchasePackage(aPackage) {
+      return this.purchase(aPackage);
     },
     async restorePurchases() {
       if (restoreStore) await restoreStore({ appUserId });
-      const info = await customerInfo();
-      notify(info);
-      return info;
+      const customer = await fetchCustomer();
+      notify(customer);
+      return customer;
     },
     restore() {
       return this.restorePurchases();
     },
+    getCustomer() {
+      return fetchCustomer();
+    },
     getCustomerInfo() {
-      return customerInfo();
+      return this.getCustomer();
     },
     presentPaywall(document, packages) {
       const keys = (packages || []).map((pkg) => pkg.lookup_key || pkg.identifier).join(" ");
       const title = textFrom(document);
       return title ? `${title} ${keys}`.trim() : keys;
     },
-    addCustomerInfoUpdateListener(listener) {
+    addCustomerUpdateListener(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    removeCustomerInfoUpdateListener(listener) {
+    removeCustomerUpdateListener(listener) {
       listeners.delete(listener);
+    },
+    addCustomerInfoUpdateListener(listener) {
+      return this.addCustomerUpdateListener(listener);
+    },
+    removeCustomerInfoUpdateListener(listener) {
+      return this.removeCustomerUpdateListener(listener);
     },
     getAppUserID() {
       return appUserId;
@@ -263,7 +282,7 @@ function toPackage(pkg, offeringIdentifier, platform) {
   };
 }
 
-export function toCustomerInfo(body) {
+export function toCustomer(body) {
   const raw = body?.entitlements || {};
   const all = {};
 

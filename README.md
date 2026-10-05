@@ -1,6 +1,6 @@
 # payblast-react-native-purchases
 
-React Native client for [Payblast](https://payblast.bitscorp.co). The call shape matches the integration in [RevenueCat's react-native-purchases](https://github.com/RevenueCat/react-native-purchases) sample (`configure`, `getOfferings`, `purchasePackage`, `getCustomerInfo`, `entitlements.active`). This package does not include RevenueCat source. It talks to the Payblast API.
+React Native client for [Payblast](https://payblast.bitscorp.co). Offerings, purchases, and entitlements follow the same flow as a store SDK. The method names are Payblast's: `purchase`, `subscribe`, and `getCustomer`. This package does not include RevenueCat source.
 
 ## Install
 
@@ -29,20 +29,23 @@ await Purchases.configure({
 
 const offerings = await Purchases.getOfferings();
 if (offerings.current !== null && offerings.current.availablePackages.length !== 0) {
-  const { customerInfo } = await Purchases.purchasePackage(offerings.current.availablePackages[0]);
-  if (typeof customerInfo.entitlements.active[ENTITLEMENT_ID] !== "undefined") {
+  const { customer } = await Purchases.purchase(offerings.current.availablePackages[0]);
+  await Purchases.subscribe(offerings.current.availablePackages[0]);
+  if (typeof customer.entitlements.active[ENTITLEMENT_ID] !== "undefined") {
     // unlock
   }
 }
 
-const customerInfo = await Purchases.getCustomerInfo();
+const customer = await Purchases.getCustomer();
 await Purchases.restorePurchases();
 await Purchases.logIn("account-id");
 ```
 
+`purchase` and `subscribe` do the same thing: buy the package on the configured store, then return `{ customer }`. Use `subscribe` when the package is a subscription.
+
 A cancelled store purchase throws `Purchases.PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR`.
 
-On `platform: "web"`, `purchasePackage` creates a Stripe Checkout session on the app maker's connected account and returns `transaction.checkoutUrl`. The entitlement becomes active after the Stripe webhook, so read `getCustomerInfo` again when the customer returns.
+On `platform: "web"`, `purchase` and `subscribe` create a Stripe Checkout session on the app maker's connected account and return `transaction.checkoutUrl`. The entitlement becomes active after the Stripe webhook, so call `getCustomer` again when the customer returns.
 
 `offerings.current.availablePackages[].product.identifier` is the store product id for the configured platform. Package lookup keys such as `monthly`, `yearly`, and `lifetime` set `packageType`.
 
@@ -51,11 +54,12 @@ On `platform: "web"`, `purchasePackage` creates a Stripe Checkout session on the
 ```text
 configure({ apiKey, appUserID, platform, baseUrl, purchaseStoreProduct, restoreStore })
 getOfferings()
-purchasePackage(package)
-getCustomerInfo()
+purchase(package)
+subscribe(package)
+getCustomer()
 restorePurchases()
 logIn(appUserID) / logOut()
-addCustomerInfoUpdateListener(listener)
+addCustomerUpdateListener(listener)
 ```
 
 The default API host is `https://payblast.bitscorp.co`. Set `baseUrl` for a local server.
