@@ -5,6 +5,7 @@ import {
   PurchasesError,
   createClient,
   createPurchases,
+  toCustomer,
 } from "../src/purchases.js";
 
 test("purchase notifies the customer info observer", async () => {
@@ -54,7 +55,11 @@ test("getOfferings, purchase, and subscribe return a customer", async () => {
     const appUserId = decodeURIComponent(url.split("/v1/customers/")[1] || "user-1");
     return json({
       app_user_id: appUserId,
-      entitlements: { pro: { is_active: true, expires_at: "2027-10-05T00:00:00Z" } },
+      entitlements: {
+        pro: { is_active: true, expires_at: "2027-10-05T00:00:00Z", product_identifier: "verbs_monthly" },
+      },
+      active_subscriptions: ["verbs_monthly"],
+      all_purchased_product_identifiers: ["verbs_monthly"],
     });
   };
 
@@ -77,11 +82,16 @@ test("getOfferings, purchase, and subscribe return a customer", async () => {
 
   const seen = [];
   purchases.addCustomerUpdateListener((customer) => seen.push(customer));
-  const { customer, productIdentifier } = await purchases.purchase(offerings.current.availablePackages[0]);
+  const { customer, customerInfo, productIdentifier } = await purchases.purchase(
+    offerings.current.availablePackages[0],
+  );
+  assert.equal(customerInfo, customer);
   assert.equal(productIdentifier, "verbs_monthly");
   assert.deepEqual(purchased, ["verbs_monthly"]);
   assert.equal(typeof customer.entitlements.active.pro !== "undefined", true);
   assert.equal(customer.entitlements.active.pro.isActive, true);
+  assert.deepEqual(customer.activeSubscriptions, ["verbs_monthly"]);
+  assert.deepEqual(customer.allPurchasedProductIdentifiers, ["verbs_monthly"]);
   assert.equal(seen.length, 1);
   const subscribed = await purchases.subscribe(offerings.current.availablePackages[1]);
   assert.equal(subscribed.productIdentifier, "verbs_lifetime");
@@ -176,6 +186,16 @@ test("a missing store module asks for a rebuild", async () => {
       error.code === PURCHASES_ERROR_CODE.PURCHASE_NOT_ALLOWED_ERROR &&
       /Rebuild/.test(error.message),
   );
+});
+
+test("an active entitlement still fills the subscription lists", () => {
+  const customer = toCustomer({
+    app_user_id: "user-1",
+    entitlements: { pro: { is_active: true } },
+  });
+  assert.deepEqual(customer.activeSubscriptions, ["pro"]);
+  assert.deepEqual(customer.allPurchasedProductIdentifiers, ["pro"]);
+  assert.equal(customer.entitlements.active.pro.isActive, true);
 });
 
 test("configure rejects a missing api key", async () => {

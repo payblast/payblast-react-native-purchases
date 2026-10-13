@@ -8,7 +8,7 @@ export const PURCHASES_ERROR_CODE = {
   STORE_PROBLEM_ERROR: "STORE_PROBLEM_ERROR",
 };
 
-const DEFAULT_BASE_URL = "https://payblast.bitscorp.co";
+const DEFAULT_BASE_URL = "https://payblastfs.com";
 
 export class PurchasesError extends Error {
   constructor(message, code = PURCHASES_ERROR_CODE.STORE_PROBLEM_ERROR) {
@@ -39,7 +39,7 @@ export function createPurchases(native) {
       const result = await native.purchase(pkg);
       const customer = result.customer || result.customerInfo;
       for (const listener of listeners) listener(customer);
-      return { ...result, customer };
+      return { ...result, customer, customerInfo: customer };
     },
     subscribe(pkg) {
       return this.purchase(pkg);
@@ -212,7 +212,7 @@ export function createClient({
 
       const customer = await fetchCustomer();
       notify(customer);
-      return { customer, productIdentifier, transaction };
+      return { customer, customerInfo: customer, productIdentifier, transaction };
     },
     subscribe(aPackage) {
       return this.purchase(aPackage);
@@ -309,16 +309,33 @@ export function toCustomer(body) {
       identifier: lookupKey,
       isActive,
       expirationDate: entitlement?.expires_at || entitlement?.expirationDate || null,
-      productIdentifier: entitlement?.product || entitlement?.productIdentifier || null,
+      productIdentifier:
+        entitlement?.product_identifier || entitlement?.product || entitlement?.productIdentifier || null,
     };
   }
 
   const active = Object.fromEntries(Object.entries(all).filter(([, entitlement]) => entitlement.isActive));
+  const activeSubscriptions = stringList(body?.active_subscriptions ?? body?.activeSubscriptions);
+  const purchased = stringList(
+    body?.all_purchased_product_identifiers ?? body?.allPurchasedProductIdentifiers,
+  );
+  const derived = uniqueStrings(Object.values(all).map((entitlement) => entitlement.productIdentifier));
+  const activeDerived = uniqueStrings(Object.values(active).map((entitlement) => entitlement.productIdentifier));
 
   return {
-    originalAppUserId: body?.app_user_id || null,
+    originalAppUserId: body?.app_user_id || body?.originalAppUserId || null,
     entitlements: { all, active },
+    activeSubscriptions: activeSubscriptions.length ? activeSubscriptions : activeDerived.length ? activeDerived : Object.keys(active),
+    allPurchasedProductIdentifiers: purchased.length ? purchased : derived.length ? derived : Object.keys(active),
   };
+}
+
+function stringList(value) {
+  return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.length > 0) : [];
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.filter((item) => typeof item === "string" && item.length > 0))];
 }
 
 function productIdFor(aPackage, platform) {

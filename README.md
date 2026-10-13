@@ -1,6 +1,6 @@
 # payblast-react-native-purchases
 
-React Native client for [Payblast](https://payblast.bitscorp.co). `purchase` and `subscribe` buy the package through the store code shipped in this package. The app does not implement StoreKit or Play Billing. This package does not include RevenueCat source.
+React Native client for [Payblast](https://payblastfs.com). `purchase` and `subscribe` buy the package through the store code shipped in this package. The app does not implement StoreKit or Play Billing. This package does not include RevenueCat source.
 
 ## Install
 
@@ -39,7 +39,9 @@ await Purchases.restorePurchases();
 await Purchases.logIn("account-id");
 ```
 
-`purchase` and `subscribe` do the same thing: show the App Store or Google Play purchase sheet for the package's product, then return `{ customer }`. Use `subscribe` when the package is a subscription.
+`purchase` and `subscribe` do the same thing: show the App Store or Google Play purchase sheet for the package's product, then return `{ customer, customerInfo }`. `customerInfo` is the same object as `customer`. `purchasePackage` calls `purchase`. Use `subscribe` when the package is a subscription.
+
+`customer.activeSubscriptions` lists store product ids that currently grant access. `customer.allPurchasedProductIdentifiers` lists store product ids the customer has bought. `customer.entitlements.active.pro.isActive` is the entitlement check. `getCustomerInfo` calls `getCustomer`.
 
 A cancelled purchase throws `Purchases.PURCHASES_ERROR_CODE.PURCHASE_CANCELLED_ERROR`.
 
@@ -64,7 +66,7 @@ logIn(appUserID) / logOut()
 addCustomerUpdateListener(listener)
 ```
 
-The default API host is `https://payblast.bitscorp.co`. Set `baseUrl` for a local server. `platform` defaults to `ios` or `android` from React Native, and to `web` everywhere else.
+The default API host is `https://payblastfs.com`. Set `baseUrl` for a local server. `platform` defaults to `ios` or `android` from React Native, and to `web` everywhere else.
 
 ```bash
 npm test
