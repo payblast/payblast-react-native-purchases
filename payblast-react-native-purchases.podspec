@@ -13,10 +13,14 @@ Pod::Spec.new do |s|
   s.source       = { :git => "https://github.com/payblast/payblast-react-native-purchases.git", :tag => "#{s.version}" }
   s.source_files = "ios/**/*.{h,m,swift}"
   s.frameworks   = "StoreKit"
-  s.dependency "React-Core"
   s.swift_version = "5.9"
   s.pod_target_xcconfig = {
-    "DEFINES_MODULE" => "YES",
-    "SWIFT_OBJC_BRIDGING_HEADER" => "${PODS_TARGET_SRCROOT}/ios/PayblastPurchases-Bridging-Header.h"
+    "DEFINES_MODULE" => "YES"
   }
+
+  if respond_to?(:install_modules_dependencies, true)
+    install_modules_dependencies(s)
+  else
+    s.dependency "React-Core"
+  end
 end

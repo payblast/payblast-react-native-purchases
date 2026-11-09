@@ -104,8 +104,8 @@ final class PayblastPurchases: NSObject {
   func purchase(
     _ productId: String,
     appUserId: String,
-    resolver resolve: @escaping RCTPromiseResolveBlock,
-    rejecter reject: @escaping RCTPromiseRejectBlock
+    resolver resolve: @escaping (Any?) -> Void,
+    rejecter reject: @escaping (String, String?, Error?) -> Void
   ) {
     Task {
       do {
@@ -124,8 +124,8 @@ final class PayblastPurchases: NSObject {
 
   @objc(restore:rejecter:)
   func restore(
-    _ resolve: @escaping RCTPromiseResolveBlock,
-    rejecter reject: @escaping RCTPromiseRejectBlock
+    _ resolve: @escaping (Any?) -> Void,
+    rejecter reject: @escaping (String, String?, Error?) -> Void
   ) {
     Task {
       do {

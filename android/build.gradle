@@ -1,36 +1,61 @@
 buildscript {
-    ext.safeExtGet = { prop, fallback ->
-        rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
-    }
     repositories {
         google()
         mavenCentral()
     }
-    dependencies {
-        classpath("com.android.tools.build:gradle:8.7.3")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.25")
-    }
+}
+
+def safeExtGet = { prop, fallback ->
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
 }
 
 apply plugin: "com.android.library"
-apply plugin: "kotlin-android"
+
+def androidGradlePluginMajor = 0
+try {
+    def version = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION
+    androidGradlePluginMajor = version.split("\\.")[0].toInteger()
+} catch (Throwable ignored) {
+}
+
+def kotlinAlreadyApplied = plugins.hasPlugin("kotlin-android") ||
+    plugins.hasPlugin("org.jetbrains.kotlin.android") ||
+    plugins.hasPlugin("com.android.built-in-kotlin")
+
+def builtInKotlin = false
+def builtInKotlinProp = project.findProperty("android.builtInKotlin")
+if (builtInKotlinProp != null) {
+    builtInKotlin = builtInKotlinProp.toString() != "false"
+} else if (androidGradlePluginMajor >= 9) {
+    // AGP 9 registers the Kotlin extension itself when built-in Kotlin is on.
+    builtInKotlin = true
+}
+
+if (!kotlinAlreadyApplied && !builtInKotlin) {
+    apply plugin: "kotlin-android"
+}
 
 android {
     namespace "co.bitscorp.payblast.purchases"
-    compileSdkVersion safeExtGet("compileSdkVersion", 35)
+    compileSdk safeExtGet("compileSdkVersion", 35)
 
     defaultConfig {
-        minSdkVersion safeExtGet("minSdkVersion", 24)
-        targetSdkVersion safeExtGet("targetSdkVersion", 35)
+        minSdk safeExtGet("minSdkVersion", 24)
+        targetSdk safeExtGet("targetSdkVersion", 35)
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
 
-    kotlinOptions {
-        jvmTarget = "17"
+["kotlin-android", "org.jetbrains.kotlin.android", "com.android.built-in-kotlin"].each { pluginId ->
+    pluginManager.withPlugin(pluginId) {
+        try {
+            android.kotlinOptions.jvmTarget = "17"
+        } catch (Throwable ignored) {
+        }
     }
 }
 

@@ -17,6 +17,10 @@ export async function loadPackages() {
   return [];
 }
 
+export function monthlyPriceLabel(aPackage) {
+  return aPackage.product.pricePerMonthString || aPackage.product.priceString;
+}
+
 export async function buy(aPackage) {
   try {
     const { customer } = await Purchases.purchase(aPackage);

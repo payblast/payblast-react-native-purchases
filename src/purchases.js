@@ -1,4 +1,6 @@
+import { withTimeout } from "./async.js";
 import { loadNativePurchases, storeFromNative } from "./native.js";
+import { pricingFromPackage } from "./prices.js";
 
 export const PURCHASES_ERROR_CODE = {
   PURCHASE_CANCELLED_ERROR: "PURCHASE_CANCELLED_ERROR",
@@ -6,9 +8,11 @@ export const PURCHASES_ERROR_CODE = {
   NETWORK_ERROR: "NETWORK_ERROR",
   CONFIGURATION_ERROR: "CONFIGURATION_ERROR",
   STORE_PROBLEM_ERROR: "STORE_PROBLEM_ERROR",
+  PRESENTATION_ERROR: "PRESENTATION_ERROR",
 };
 
 const DEFAULT_BASE_URL = "https://payblastfs.com";
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 
 export class PurchasesError extends Error {
   constructor(message, code = PURCHASES_ERROR_CODE.STORE_PROBLEM_ERROR) {
@@ -24,16 +28,31 @@ export function createPurchases(native) {
 
   return {
     configure(apiKey, appUserId) {
-      return native.configure(apiKey, appUserId);
+      return Promise.resolve(native.configure(apiKey, appUserId));
     },
     logIn(appUserId) {
-      return native.logIn(appUserId);
+      return Promise.resolve(native.logIn(appUserId));
     },
     logOut() {
-      return native.logOut();
+      return Promise.resolve(native.logOut());
     },
     getOfferings() {
-      return native.getOfferings();
+      return Promise.resolve(native.getOfferings());
+    },
+    async getCurrentOfferingForPlacement(placementIdentifier) {
+      if (typeof native.getCurrentOfferingForPlacement === "function") {
+        try {
+          return await native.getCurrentOfferingForPlacement(placementIdentifier);
+        } catch (error) {
+          if (error instanceof PurchasesError) throw error;
+          throw new PurchasesError(
+            error?.message || "Placement lookup failed",
+            PURCHASES_ERROR_CODE.NETWORK_ERROR,
+          );
+        }
+      }
+      const offerings = await this.getOfferings();
+      return offeringForPlacement(offerings, placementIdentifier);
     },
     async purchase(pkg) {
       const result = await native.purchase(pkg);
@@ -45,13 +64,13 @@ export function createPurchases(native) {
       return this.purchase(pkg);
     },
     restore() {
-      return native.restore();
+      return Promise.resolve(native.restore());
     },
     restorePurchases() {
-      return native.restore();
+      return Promise.resolve(native.restore());
     },
     getCustomer() {
-      return native.getCustomer ? native.getCustomer() : native.getCustomerInfo();
+      return Promise.resolve(native.getCustomer ? native.getCustomer() : native.getCustomerInfo());
     },
     getCustomerInfo() {
       return this.getCustomer();
@@ -76,6 +95,11 @@ export function createClient({
   purchaseStoreProduct = null,
   restoreStore = null,
   nativeModule,
+  presentPaywall: presentPaywallImpl = null,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  presentTimeoutMs = 15_000,
+  nativeTimeoutMs = 0,
+  locale,
 } = {}) {
   let apiKey = null;
   let appUserId = null;
@@ -96,15 +120,20 @@ export function createClient({
     let response;
 
     try {
-      response = await fetchImpl(`${baseUrl}${path}`, {
-        ...options,
-        headers: {
-          authorization: `Bearer ${apiKey}`,
-          "content-type": "application/json",
-          ...(options.headers || {}),
-        },
-      });
+      response = await withTimeout(
+        fetchImpl(`${baseUrl}${path}`, {
+          ...options,
+          headers: {
+            authorization: `Bearer ${apiKey}`,
+            "content-type": "application/json",
+            ...(options.headers || {}),
+          },
+        }),
+        requestTimeoutMs,
+        () => new PurchasesError("Payblast request timed out", PURCHASES_ERROR_CODE.NETWORK_ERROR),
+      );
     } catch (error) {
+      if (error instanceof PurchasesError) throw error;
       throw new PurchasesError(error.message || "Network request failed", PURCHASES_ERROR_CODE.NETWORK_ERROR);
     }
 
@@ -115,7 +144,11 @@ export function createClient({
       );
     }
 
-    return response.json();
+    try {
+      return await response.json();
+    } catch (error) {
+      throw new PurchasesError(error.message || "Payblast returned invalid JSON", PURCHASES_ERROR_CODE.NETWORK_ERROR);
+    }
   }
 
   async function fetchCustomer() {
@@ -123,10 +156,30 @@ export function createClient({
     return toCustomer(body);
   }
 
+  function settleNative(result, message) {
+    return withTimeout(result, nativeTimeoutMs, () => new PurchasesError(message, PURCHASES_ERROR_CODE.STORE_PROBLEM_ERROR));
+  }
+
   function resolveStore() {
-    if (purchaseStoreProduct) return { purchaseStoreProduct, restoreStore };
+    if (purchaseStoreProduct) {
+      return {
+        purchaseStoreProduct: (args) =>
+          settleNative(purchaseStoreProduct(args), "The store purchase did not finish."),
+        restoreStore: restoreStore
+          ? (args) => settleNative(restoreStore(args), "Restore did not finish.")
+          : null,
+      };
+    }
     const linked = nativeModule === undefined ? loadNativePurchases() : nativeModule;
-    return storeFromNative(linked);
+    const store = storeFromNative(linked);
+    if (!store) return null;
+    return {
+      purchaseStoreProduct: (args) =>
+        settleNative(store.purchaseStoreProduct(args), "The store purchase did not finish."),
+      restoreStore: store.restoreStore
+        ? (args) => settleNative(store.restoreStore(args), "Restore did not finish.")
+        : null,
+    };
   }
 
   return {
@@ -138,6 +191,11 @@ export function createClient({
       if (config.platform) platform = config.platform;
       if (config.purchaseStoreProduct) purchaseStoreProduct = config.purchaseStoreProduct;
       if (config.restoreStore) restoreStore = config.restoreStore;
+      if (config.presentPaywall) presentPaywallImpl = config.presentPaywall;
+      if (config.locale) locale = config.locale;
+      if (config.requestTimeoutMs != null) requestTimeoutMs = config.requestTimeoutMs;
+      if (config.presentTimeoutMs != null) presentTimeoutMs = config.presentTimeoutMs;
+      if (config.nativeTimeoutMs != null) nativeTimeoutMs = config.nativeTimeoutMs;
     },
     async logIn(nextAppUserId) {
       if (!nextAppUserId || typeof nextAppUserId !== "string") {
@@ -162,7 +220,19 @@ export function createClient({
     },
     async getOfferings() {
       const body = await request("/v1/offerings");
-      return toOfferings(body, platform);
+      return toOfferings(body, platform, locale);
+    },
+    async getCurrentOfferingForPlacement(placementIdentifier) {
+      if (!placementIdentifier || typeof placementIdentifier !== "string") {
+        throw new PurchasesError(
+          "placementIdentifier needs to be a string",
+          PURCHASES_ERROR_CODE.CONFIGURATION_ERROR,
+        );
+      }
+
+      const body = await request(`/v1/offerings?placement=${encodeURIComponent(placementIdentifier)}`);
+      const offerings = toOfferings(body, platform, locale);
+      return offeringForPlacement(offerings, placementIdentifier);
     },
     async purchase(aPackage) {
       const productIdentifier = productIdFor(aPackage, platform);
@@ -237,6 +307,28 @@ export function createClient({
       return this.getCustomer();
     },
     presentPaywall(document, packages) {
+      if (typeof presentPaywallImpl === "function") {
+        return Promise.resolve()
+          .then(() =>
+            withTimeout(
+              Promise.resolve(presentPaywallImpl(document, packages)),
+              presentTimeoutMs,
+              () =>
+                new PurchasesError(
+                  "Paywall could not be presented.",
+                  PURCHASES_ERROR_CODE.PRESENTATION_ERROR,
+                ),
+            ),
+          )
+          .catch((error) => {
+            if (error instanceof PurchasesError) throw error;
+            throw new PurchasesError(
+              error?.message || "Paywall could not be presented.",
+              PURCHASES_ERROR_CODE.PRESENTATION_ERROR,
+            );
+          });
+      }
+
       const keys = (packages || []).map((pkg) => pkg.lookup_key || pkg.identifier).join(" ");
       const title = textFrom(document);
       return title ? `${title} ${keys}`.trim() : keys;
@@ -252,7 +344,7 @@ export function createClient({
       return this.addCustomerUpdateListener(listener);
     },
     removeCustomerInfoUpdateListener(listener) {
-      return this.removeCustomerUpdateListener(listener);
+      return this.removeCustomerInfoUpdateListener(listener);
     },
     getAppUserID() {
       return appUserId;
@@ -260,8 +352,8 @@ export function createClient({
   };
 }
 
-export function toOfferings(body, platform) {
-  const offerings = (body?.offerings || []).map((offering) => toOffering(offering, platform));
+export function toOfferings(body, platform, locale) {
+  const offerings = (body?.offerings || []).map((offering) => toOffering(offering, platform, locale));
   const current =
     offerings.find((offering) => offering.payblastId === body?.current_offering_id) ||
     offerings.find((offering) => offering.isCurrent) ||
@@ -270,8 +362,10 @@ export function toOfferings(body, platform) {
   return { all, current };
 }
 
-function toOffering(offering, platform) {
-  const availablePackages = (offering.packages || []).map((pkg) => toPackage(pkg, offering.lookup_key, platform));
+function toOffering(offering, platform, locale) {
+  const availablePackages = (offering.packages || []).map((pkg) =>
+    toPackage(pkg, offering.lookup_key, platform, locale),
+  );
   return {
     identifier: offering.lookup_key,
     serverDescription: offering.lookup_key,
@@ -281,20 +375,22 @@ function toOffering(offering, platform) {
   };
 }
 
-function toPackage(pkg, offeringIdentifier, platform) {
+function toPackage(pkg, offeringIdentifier, platform, locale) {
   const products = pkg.products || {};
   const identifier = products[platform] || products.ios || products.android || products.web || pkg.lookup_key;
+  const type = packageType(pkg.lookup_key);
+  const pricing = pricingFromPackage(pkg, type, locale);
   return {
     identifier: pkg.lookup_key,
-    packageType: packageType(pkg.lookup_key),
+    packageType: type,
     offeringIdentifier,
     products,
     product: {
       identifier,
       title: pkg.lookup_key,
-      description: "",
-      priceString: "",
-      productCategory: packageType(pkg.lookup_key) === "LIFETIME" ? "NON_SUBSCRIPTION" : "SUBSCRIPTION",
+      description: pkg.description || "",
+      productCategory: type === "LIFETIME" ? "NON_SUBSCRIPTION" : "SUBSCRIPTION",
+      ...pricing,
     },
   };
 }
@@ -328,6 +424,12 @@ export function toCustomer(body) {
     activeSubscriptions: activeSubscriptions.length ? activeSubscriptions : activeDerived.length ? activeDerived : Object.keys(active),
     allPurchasedProductIdentifiers: purchased.length ? purchased : derived.length ? derived : Object.keys(active),
   };
+}
+
+export function offeringForPlacement(offerings, placementIdentifier) {
+  if (!offerings) return null;
+  if (placementIdentifier && offerings.all?.[placementIdentifier]) return offerings.all[placementIdentifier];
+  return offerings.current ?? null;
 }
 
 function stringList(value) {
