@@ -78,6 +78,8 @@ test("getOfferings, purchase, and subscribe return a customer", async () => {
   const offerings = await purchases.getOfferings();
   assert.equal(offerings.current.identifier, "default");
   assert.equal(offerings.current.availablePackages[0].product.identifier, "verbs_monthly");
+  assert.equal(offerings.current.availablePackages[0].product.price, null);
+  assert.equal(offerings.current.availablePackages[0].product.priceString, "");
   assert.equal(offerings.current.availablePackages[1].packageType, "LIFETIME");
 
   const seen = [];

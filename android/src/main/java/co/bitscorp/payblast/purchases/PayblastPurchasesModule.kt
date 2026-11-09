@@ -1,6 +1,8 @@
 package co.bitscorp.payblast.purchases
 
 import android.app.Activity
+import android.os.Handler
+import android.os.Looper
 import com.android.billingclient.api.AcknowledgePurchaseParams
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingClientStateListener
@@ -13,6 +15,7 @@ import com.android.billingclient.api.PurchasesUpdatedListener
 import com.android.billingclient.api.QueryProductDetailsParams
 import com.android.billingclient.api.QueryPurchasesParams
 import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.LifecycleEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -22,7 +25,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 // BillingClient flow: https://developer.android.com/google/play/billing/integrate
 class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext),
-    PurchasesUpdatedListener {
+    PurchasesUpdatedListener,
+    LifecycleEventListener {
 
     private val billingClient: BillingClient = BillingClient.newBuilder(reactContext)
         .setListener(this)
@@ -35,6 +39,11 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
     private val connecting = AtomicBoolean(false)
     private val readyWaiters = mutableListOf<(Boolean) -> Unit>()
     private var purchasePromise: Promise? = null
+    private val handler = Handler(Looper.getMainLooper())
+
+    init {
+        reactContext.addLifecycleEventListener(this)
+    }
 
     override fun getName(): String = "PayblastPurchases"
 
@@ -51,14 +60,17 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
                 return@ensureReady
             }
 
-            findProduct(productId) { details ->
+            findProduct(productId) { details, error ->
                 if (details == null) {
-                    promise.reject("product_unavailable", "This product is not available in Google Play.")
+                    promise.reject(
+                        if (error == null) "product_unavailable" else "store_problem",
+                        error ?: "This product is not available in Google Play.",
+                    )
                     return@findProduct
                 }
 
                 reactApplicationContext.runOnUiQueueThread {
-                    val activity = reactApplicationContext.currentActivity
+                    val activity = getCurrentActivity()
                     if (activity == null) {
                         promise.reject("store_problem", "Open the app before starting a purchase.")
                         return@runOnUiQueueThread
@@ -76,8 +88,16 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
                 promise.reject("store_problem", "Google Play Billing is not available.")
                 return@ensureReady
             }
-            queryOwned(BillingClient.ProductType.SUBS) { subscriptions ->
-                queryOwned(BillingClient.ProductType.INAPP) { oneTime ->
+            queryOwned(BillingClient.ProductType.SUBS) { subscriptions, subsError ->
+                if (subsError != null) {
+                    promise.reject("store_problem", subsError)
+                    return@queryOwned
+                }
+                queryOwned(BillingClient.ProductType.INAPP) { oneTime, inappError ->
+                    if (inappError != null) {
+                        promise.reject("store_problem", inappError)
+                        return@queryOwned
+                    }
                     val ids = (subscriptions + oneTime).distinct()
                     val result = Arguments.createMap()
                     result.putArray("productIdentifiers", Arguments.fromList(ids))
@@ -117,6 +137,14 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    override fun onHostResume() {}
+
+    override fun onHostPause() {}
+
+    override fun onHostDestroy() {
+        takePromise()?.reject("store_problem", "The purchase sheet could not be presented.")
+    }
+
     private fun launch(activity: Activity, details: ProductDetails, appUserId: String, promise: Promise) {
         synchronized(this) {
             purchasePromise?.reject("store_problem", "Another purchase is already in progress.")
@@ -144,17 +172,19 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    private fun findProduct(productId: String, done: (ProductDetails?) -> Unit) {
-        queryProduct(productId, BillingClient.ProductType.SUBS) { subscription ->
-            if (subscription != null) {
-                done(subscription)
+    private fun findProduct(productId: String, done: (ProductDetails?, String?) -> Unit) {
+        queryProduct(productId, BillingClient.ProductType.SUBS) { subscription, subsError ->
+            if (subsError != null) {
+                done(null, subsError)
+            } else if (subscription != null) {
+                done(subscription, null)
             } else {
                 queryProduct(productId, BillingClient.ProductType.INAPP, done)
             }
         }
     }
 
-    private fun queryProduct(productId: String, productType: String, done: (ProductDetails?) -> Unit) {
+    private fun queryProduct(productId: String, productType: String, done: (ProductDetails?, String?) -> Unit) {
         val product = QueryProductDetailsParams.Product.newBuilder()
             .setProductId(productId)
             .setProductType(productType)
@@ -165,23 +195,23 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
 
         billingClient.queryProductDetailsAsync(params) { billingResult, queryProductDetailsResult ->
             if (billingResult.responseCode != BillingClient.BillingResponseCode.OK) {
-                done(null)
+                done(null, billingResult.debugMessage.ifBlank { "Google Play product lookup failed." })
                 return@queryProductDetailsAsync
             }
-            done(queryProductDetailsResult.productDetailsList.firstOrNull())
+            done(queryProductDetailsResult.productDetailsList.firstOrNull(), null)
         }
     }
 
-    private fun queryOwned(productType: String, done: (List<String>) -> Unit) {
+    private fun queryOwned(productType: String, done: (List<String>, String?) -> Unit) {
         val params = QueryPurchasesParams.newBuilder().setProductType(productType).build()
         billingClient.queryPurchasesAsync(params) { billingResult, purchases ->
             if (billingResult.responseCode != BillingClient.BillingResponseCode.OK) {
-                done(emptyList())
+                done(emptyList(), billingResult.debugMessage.ifBlank { "Google Play restore failed." })
                 return@queryPurchasesAsync
             }
             val purchased = purchases.filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
             if (purchased.isEmpty()) {
-                done(emptyList())
+                done(emptyList(), null)
                 return@queryPurchasesAsync
             }
             val ids = mutableListOf<String>()
@@ -193,7 +223,7 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
                         remaining -= 1
                         remaining == 0
                     }
-                    if (finished) done(ids.toList())
+                    if (finished) done(ids.toList(), null)
                 }
             }
         }
@@ -224,7 +254,12 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
             done(true)
             return
         }
-        synchronized(readyWaiters) { readyWaiters.add(done) }
+        val finished = AtomicBoolean(false)
+        fun finish(ready: Boolean) {
+            if (finished.compareAndSet(false, true)) done(ready)
+        }
+        synchronized(readyWaiters) { readyWaiters.add { ready -> finish(ready) } }
+        handler.postDelayed({ finish(false) }, BILLING_CONNECT_TIMEOUT_MS)
         if (!connecting.compareAndSet(false, true)) return
 
         billingClient.startConnection(object : BillingClientStateListener {
@@ -248,5 +283,9 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
         val current = purchasePromise
         purchasePromise = null
         return current
+    }
+
+    companion object {
+        private const val BILLING_CONNECT_TIMEOUT_MS = 15_000L
     }
 }

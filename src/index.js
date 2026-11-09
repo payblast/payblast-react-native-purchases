@@ -1,4 +1,21 @@
-import { PURCHASES_ERROR_CODE, PurchasesError, createClient } from "./purchases.js";
+import {
+  PURCHASES_ERROR_CODE,
+  PurchasesError,
+  createClient,
+  createPurchases,
+  toCustomer,
+  toOfferings,
+} from "./purchases.js";
+import {
+  currencyMinorDigits,
+  decimalAmount,
+  formatPrice,
+  periodPrices,
+  pricePerDay,
+  pricePerMonth,
+  pricePerWeek,
+  pricePerYear,
+} from "./prices.js";
 
 const client = createClient();
 
@@ -9,6 +26,9 @@ const Purchases = {
   },
   getOfferings() {
     return client.getOfferings();
+  },
+  getCurrentOfferingForPlacement(placementIdentifier) {
+    return client.getCurrentOfferingForPlacement(placementIdentifier);
   },
   purchase(aPackage) {
     return client.purchase(aPackage);
@@ -50,12 +70,34 @@ const Purchases = {
     return client.addCustomerUpdateListener(listener);
   },
   removeCustomerInfoUpdateListener(listener) {
-    return client.removeCustomerUpdateListener(listener);
+    return client.removeCustomerInfoUpdateListener(listener);
   },
   presentPaywall(document, packages) {
     return client.presentPaywall(document, packages);
   },
+  periodPrices,
+  pricePerDay,
+  pricePerWeek,
+  pricePerMonth,
+  pricePerYear,
+  formatPrice,
+  currencyMinorDigits,
 };
 
-export { PURCHASES_ERROR_CODE, PurchasesError, createClient };
+export {
+  PURCHASES_ERROR_CODE,
+  PurchasesError,
+  createClient,
+  createPurchases,
+  currencyMinorDigits,
+  decimalAmount,
+  formatPrice,
+  periodPrices,
+  pricePerDay,
+  pricePerMonth,
+  pricePerWeek,
+  pricePerYear,
+  toCustomer,
+  toOfferings,
+};
 export default Purchases;

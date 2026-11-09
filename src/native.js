@@ -14,11 +14,11 @@ export function storeFromNative(nativeModule) {
 
   return {
     purchaseStoreProduct({ productIdentifier, appUserId }) {
-      return nativeModule.purchase(productIdentifier, appUserId || "");
+      return Promise.resolve(nativeModule.purchase(productIdentifier, appUserId || ""));
     },
     restoreStore() {
-      if (typeof nativeModule.restore !== "function") return null;
-      return nativeModule.restore();
+      if (typeof nativeModule.restore !== "function") return Promise.resolve(null);
+      return Promise.resolve(nativeModule.restore());
     },
   };
 }
