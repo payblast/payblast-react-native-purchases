@@ -1,6 +1,14 @@
 import Foundation
 import StoreKit
 
+enum EntitlementVerificationMode: String {
+  case disabled = "DISABLED"
+  case informational = "INFORMATIONAL"
+  case enforced = "ENFORCED"
+
+  static let `default`: EntitlementVerificationMode = .enforced
+}
+
 private enum StorePurchaseError: Error {
   case cancelled
   case productUnavailable
@@ -29,7 +37,14 @@ private enum StorePurchaseError: Error {
 enum StorePurchase {
   // Product.products(for:) and Product.purchase()
   // https://developer.apple.com/documentation/storekit/product/purchase(options:)
-  static func buy(productId: String, appUserId: String) async throws -> String {
+  //
+  // Customer info lives in JS. This module does not decode cached JSON; StoreKit
+  // work runs on a detached task so it never blocks the main thread.
+  static func buy(
+    productId: String,
+    appUserId: String,
+    verificationMode: EntitlementVerificationMode = .enforced
+  ) async throws -> String {
     let trimmed = productId.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { throw StorePurchaseError.productUnavailable }
 
@@ -44,13 +59,7 @@ enum StorePurchase {
     let result = try await product.purchase(options: options)
     switch result {
     case .success(let verification):
-      switch verification {
-      case .verified(let transaction):
-        await transaction.finish()
-        return String(transaction.id)
-      case .unverified:
-        throw StorePurchaseError.unverified
-      }
+      return try await accept(verification, mode: verificationMode)
     case .userCancelled:
       throw StorePurchaseError.cancelled
     case .pending:
@@ -62,7 +71,7 @@ enum StorePurchase {
 
   // AppStore.sync() replays the account's purchases.
   // https://developer.apple.com/documentation/storekit/appstore/sync()
-  static func restore() async throws -> [String] {
+  static func restore(verificationMode: EntitlementVerificationMode = .enforced) async throws -> [String] {
     do {
       try await AppStore.sync()
     } catch StoreKitError.userCancelled {
@@ -71,20 +80,46 @@ enum StorePurchase {
 
     var productIds: [String] = []
     for await verification in Transaction.currentEntitlements {
-      if case .verified(let transaction) = verification {
+      if let transaction = try? acceptedTransaction(verification, mode: verificationMode) {
         productIds.append(transaction.productID)
       }
     }
     return productIds
+  }
+
+  private static func accept(
+    _ verification: VerificationResult<Transaction>,
+    mode: EntitlementVerificationMode
+  ) async throws -> String {
+    let transaction = try acceptedTransaction(verification, mode: mode)
+    await transaction.finish()
+    return String(transaction.id)
+  }
+
+  private static func acceptedTransaction(
+    _ verification: VerificationResult<Transaction>,
+    mode: EntitlementVerificationMode
+  ) throws -> Transaction {
+    switch verification {
+    case .verified(let transaction):
+      return transaction
+    case .unverified(let transaction, _):
+      if mode == .enforced {
+        throw StorePurchaseError.unverified
+      }
+      return transaction
+    }
   }
 }
 
 @objc(PayblastPurchases)
 final class PayblastPurchases: NSObject {
   private let updates: Task<Void, Never>
+  private let modeLock = NSLock()
+  private var verificationMode: EntitlementVerificationMode = .enforced
 
   override init() {
-    updates = Task {
+    updates = Task.detached(priority: .utility) {
       for await verification in Transaction.updates {
         if case .verified(let transaction) = verification {
           await transaction.finish()
@@ -100,6 +135,21 @@ final class PayblastPurchases: NSObject {
 
   @objc static func requiresMainQueueSetup() -> Bool { false }
 
+  @objc(setEntitlementVerificationMode:)
+  func setEntitlementVerificationMode(_ mode: String) {
+    guard let parsed = EntitlementVerificationMode(rawValue: mode) else { return }
+    modeLock.lock()
+    verificationMode = parsed
+    modeLock.unlock()
+  }
+
+  private func currentVerificationMode() -> EntitlementVerificationMode {
+    modeLock.lock()
+    let mode = verificationMode
+    modeLock.unlock()
+    return mode
+  }
+
   @objc(purchase:appUserId:resolver:rejecter:)
   func purchase(
     _ productId: String,
@@ -107,9 +157,14 @@ final class PayblastPurchases: NSObject {
     resolver resolve: @escaping (Any?) -> Void,
     rejecter reject: @escaping (String, String?, Error?) -> Void
   ) {
-    Task {
+    let mode = currentVerificationMode()
+    Task.detached(priority: .userInitiated) {
       do {
-        let transactionId = try await StorePurchase.buy(productId: productId, appUserId: appUserId)
+        let transactionId = try await StorePurchase.buy(
+          productId: productId,
+          appUserId: appUserId,
+          verificationMode: mode
+        )
         resolve([
           "transactionIdentifier": transactionId,
           "productIdentifier": productId,
@@ -127,9 +182,10 @@ final class PayblastPurchases: NSObject {
     _ resolve: @escaping (Any?) -> Void,
     rejecter reject: @escaping (String, String?, Error?) -> Void
   ) {
-    Task {
+    let mode = currentVerificationMode()
+    Task.detached(priority: .utility) {
       do {
-        let productIds = try await StorePurchase.restore()
+        let productIds = try await StorePurchase.restore(verificationMode: mode)
         resolve(["productIdentifiers": productIds])
       } catch let error as StorePurchaseError {
         reject(error.code, error.message, nil)

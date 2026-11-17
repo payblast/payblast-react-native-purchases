@@ -86,7 +86,7 @@ Pass `locale` to `configure` to format every price string the same way. Lifetime
 ## API
 
 ```text
-configure({ apiKey, appUserID, platform, baseUrl, locale, purchaseStoreProduct, restoreStore, requestTimeoutMs, nativeTimeoutMs })
+configure({ apiKey, appUserID, platform, baseUrl, locale, purchaseStoreProduct, restoreStore, requestTimeoutMs, nativeTimeoutMs, entitlementVerificationMode })
 getOfferings()
 getCurrentOfferingForPlacement(placementIdentifier)
 purchase(package)
@@ -94,6 +94,7 @@ subscribe(package)
 getCustomer()
 restorePurchases()
 logIn(appUserID) / logOut()
+getEntitlementVerificationMode()
 addCustomerUpdateListener(listener)
 presentPaywall(document, packages)
 periodPrices({ price, priceMicros, unitAmount, currencyCode, billedPeriod, locale })
@@ -101,6 +102,22 @@ pricePerDay / pricePerWeek / pricePerMonth / pricePerYear
 ```
 
 The default API host is `https://payblastfs.com`. Set `baseUrl` for a local server. `platform` defaults to `ios` or `android` from React Native, and to `web` everywhere else. Requests time out after 30 seconds.
+
+## Entitlement verification
+
+StoreKit 2 JWS verification is **enforced** by default. Unverified App Store transactions are rejected. Play Billing signature checks stay on; only `PURCHASED` transactions are accepted.
+
+`entitlementVerificationMode` defaults to `Purchases.ENTITLEMENT_VERIFICATION_MODE.ENFORCED`. `Purchases.configure({ apiKey })` does **not** send a verification mode to native code, so a missing JS option cannot override the native default. Pass `entitlementVerificationMode` only when you want `INFORMATIONAL` or `DISABLED`.
+
+## Native threading
+
+The iOS module returns `requiresMainQueueSetup() == false`. Purchases, restores, and StoreKit entitlement reads run on detached tasks. This package does not keep a native customer-info cache, so it never decodes cached JSON on the main thread.
+
+Android does not register a `ContentProvider` or App Startup initializer. `BillingClient` is created on a background executor on the first `purchase` or `restore`, not at process start or native-module construction. Only `launchBillingFlow` runs on the UI thread.
+
+## Offerings while offline
+
+`getOfferings()` always hits the network. A failed fetch is not sticky: the next `getOfferings()` or `getCurrentOfferingForPlacement()` tries again. After a **network** error the SDK also retries in the background with exponential backoff (1s, 2s, 4s, … capped at 60s), when the app returns to the foreground, and on the web `online` event. Concurrent offerings requests share one in-flight call. 4xx / configuration errors are not retried.
 
 ```bash
 npm test

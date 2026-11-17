@@ -1,8 +1,6 @@
 package co.bitscorp.payblast.purchases
 
 import android.app.Activity
-import android.os.Handler
-import android.os.Looper
 import com.android.billingclient.api.AcknowledgePurchaseParams
 import com.android.billingclient.api.BillingClient
 import com.android.billingclient.api.BillingClientStateListener
@@ -20,32 +18,55 @@ import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
 // BillingClient flow: https://developer.android.com/google/play/billing/integrate
+//
+// Play Billing is created on a background executor on the first purchase or
+// restore. There is no ContentProvider / App Startup initializer, so process
+// start (including push wakeups) does not run SDK init on the main thread.
 class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext),
     PurchasesUpdatedListener,
     LifecycleEventListener {
 
-    private val billingClient: BillingClient = BillingClient.newBuilder(reactContext)
-        .setListener(this)
-        .enablePendingPurchases(
-            PendingPurchasesParams.newBuilder().enableOneTimeProducts().build(),
-        )
-        .enableAutoServiceReconnection()
-        .build()
+    private val workExecutor: ScheduledExecutorService =
+        Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "PayblastPurchases").apply { isDaemon = true }
+        }
 
+    private val lock = Any()
+    private var billingClient: BillingClient? = null
     private val connecting = AtomicBoolean(false)
     private val readyWaiters = mutableListOf<(Boolean) -> Unit>()
     private var purchasePromise: Promise? = null
-    private val handler = Handler(Looper.getMainLooper())
+    @Volatile private var verificationMode = ENTITLEMENT_VERIFICATION_MODE_ENFORCED
 
     init {
         reactContext.addLifecycleEventListener(this)
     }
 
     override fun getName(): String = "PayblastPurchases"
+
+    override fun getConstants(): MutableMap<String, Any> {
+        return hashMapOf(
+            "defaultEntitlementVerificationMode" to ENTITLEMENT_VERIFICATION_MODE_ENFORCED,
+            "entitlementVerificationMode" to verificationMode,
+        )
+    }
+
+    @ReactMethod
+    fun setEntitlementVerificationMode(mode: String) {
+        when (mode) {
+            ENTITLEMENT_VERIFICATION_MODE_DISABLED,
+            ENTITLEMENT_VERIFICATION_MODE_INFORMATIONAL,
+            ENTITLEMENT_VERIFICATION_MODE_ENFORCED,
+            -> verificationMode = mode
+        }
+    }
 
     @ReactMethod
     fun purchase(productId: String, appUserId: String, promise: Promise) {
@@ -120,6 +141,10 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
                     promise.reject("pending", "The purchase is pending.")
                     return
                 }
+                if (purchase.purchaseState != Purchase.PurchaseState.PURCHASED) {
+                    promise.reject("unverified", "Google Play could not verify the purchase.")
+                    return
+                }
                 acknowledge(purchase) {
                     val result = Arguments.createMap()
                     result.putString("transactionIdentifier", purchase.orderId ?: purchase.purchaseToken)
@@ -163,7 +188,11 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
             }
             .build()
 
-        val launched = billingClient.launchBillingFlow(activity, flow)
+        val launched = billingClientOrNull()?.launchBillingFlow(activity, flow)
+            ?: run {
+                takePromise()?.reject("store_problem", "Google Play Billing is not available.")
+                return
+            }
         if (launched.responseCode != BillingClient.BillingResponseCode.OK) {
             takePromise()?.reject(
                 "store_problem",
@@ -185,6 +214,11 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
     }
 
     private fun queryProduct(productId: String, productType: String, done: (ProductDetails?, String?) -> Unit) {
+        val client = billingClientOrNull()
+        if (client == null) {
+            done(null, "Google Play Billing is not available.")
+            return
+        }
         val product = QueryProductDetailsParams.Product.newBuilder()
             .setProductId(productId)
             .setProductType(productType)
@@ -193,7 +227,7 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
             .setProductList(listOf(product))
             .build()
 
-        billingClient.queryProductDetailsAsync(params) { billingResult, queryProductDetailsResult ->
+        client.queryProductDetailsAsync(params) { billingResult, queryProductDetailsResult ->
             if (billingResult.responseCode != BillingClient.BillingResponseCode.OK) {
                 done(null, billingResult.debugMessage.ifBlank { "Google Play product lookup failed." })
                 return@queryProductDetailsAsync
@@ -203,8 +237,13 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
     }
 
     private fun queryOwned(productType: String, done: (List<String>, String?) -> Unit) {
+        val client = billingClientOrNull()
+        if (client == null) {
+            done(emptyList(), "Google Play Billing is not available.")
+            return
+        }
         val params = QueryPurchasesParams.newBuilder().setProductType(productType).build()
-        billingClient.queryPurchasesAsync(params) { billingResult, purchases ->
+        client.queryPurchasesAsync(params) { billingResult, purchases ->
             if (billingResult.responseCode != BillingClient.BillingResponseCode.OK) {
                 done(emptyList(), billingResult.debugMessage.ifBlank { "Google Play restore failed." })
                 return@queryPurchasesAsync
@@ -234,10 +273,15 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
             done()
             return
         }
+        val client = billingClientOrNull()
+        if (client == null) {
+            done()
+            return
+        }
         val params = AcknowledgePurchaseParams.newBuilder()
             .setPurchaseToken(purchase.purchaseToken)
             .build()
-        billingClient.acknowledgePurchase(params) { done() }
+        client.acknowledgePurchase(params) { done() }
     }
 
     private fun offerToken(details: ProductDetails): String? {
@@ -250,33 +294,53 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
     }
 
     private fun ensureReady(done: (Boolean) -> Unit) {
-        if (billingClient.isReady) {
-            done(true)
-            return
-        }
-        val finished = AtomicBoolean(false)
-        fun finish(ready: Boolean) {
-            if (finished.compareAndSet(false, true)) done(ready)
-        }
-        synchronized(readyWaiters) { readyWaiters.add { ready -> finish(ready) } }
-        handler.postDelayed({ finish(false) }, BILLING_CONNECT_TIMEOUT_MS)
-        if (!connecting.compareAndSet(false, true)) return
+        workExecutor.execute {
+            val client = billingClientLocked()
+            if (client.isReady) {
+                done(true)
+                return@execute
+            }
+            val finished = AtomicBoolean(false)
+            fun finish(ready: Boolean) {
+                if (finished.compareAndSet(false, true)) done(ready)
+            }
+            synchronized(readyWaiters) { readyWaiters.add { ready -> finish(ready) } }
+            workExecutor.schedule({ finish(false) }, BILLING_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            if (!connecting.compareAndSet(false, true)) return@execute
 
-        billingClient.startConnection(object : BillingClientStateListener {
-            override fun onBillingSetupFinished(billingResult: BillingResult) {
-                connecting.set(false)
-                val ready = billingResult.responseCode == BillingClient.BillingResponseCode.OK
-                val waiters = synchronized(readyWaiters) {
-                    readyWaiters.toList().also { readyWaiters.clear() }
+            client.startConnection(object : BillingClientStateListener {
+                override fun onBillingSetupFinished(billingResult: BillingResult) {
+                    connecting.set(false)
+                    val ready = billingResult.responseCode == BillingClient.BillingResponseCode.OK
+                    val waiters = synchronized(readyWaiters) {
+                        readyWaiters.toList().also { readyWaiters.clear() }
+                    }
+                    waiters.forEach { it(ready) }
                 }
-                waiters.forEach { it(ready) }
-            }
 
-            override fun onBillingServiceDisconnected() {
-                // enableAutoServiceReconnection() retries the next Play call.
-            }
-        })
+                override fun onBillingServiceDisconnected() {
+                    // enableAutoServiceReconnection() retries the next Play call.
+                }
+            })
+        }
     }
+
+    private fun billingClientLocked(): BillingClient {
+        synchronized(lock) {
+            billingClient?.let { return it }
+            val client = BillingClient.newBuilder(reactApplicationContext)
+                .setListener(this)
+                .enablePendingPurchases(
+                    PendingPurchasesParams.newBuilder().enableOneTimeProducts().build(),
+                )
+                .enableAutoServiceReconnection()
+                .build()
+            billingClient = client
+            return client
+        }
+    }
+
+    private fun billingClientOrNull(): BillingClient? = synchronized(lock) { billingClient }
 
     @Synchronized
     private fun takePromise(): Promise? {
@@ -287,5 +351,8 @@ class PayblastPurchasesModule(reactContext: ReactApplicationContext) :
 
     companion object {
         private const val BILLING_CONNECT_TIMEOUT_MS = 15_000L
+        private const val ENTITLEMENT_VERIFICATION_MODE_DISABLED = "DISABLED"
+        private const val ENTITLEMENT_VERIFICATION_MODE_INFORMATIONAL = "INFORMATIONAL"
+        private const val ENTITLEMENT_VERIFICATION_MODE_ENFORCED = "ENFORCED"
     }
 }

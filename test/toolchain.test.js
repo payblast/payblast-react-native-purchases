@@ -34,3 +34,38 @@ test("iOS native purchase methods always resolve or reject", () => {
   assert.match(source, /reject\("store_problem"/);
   assert.equal(source.includes("RCTPromiseResolveBlock"), false);
 });
+
+test("iOS verification defaults to ENFORCED and store work is off the main thread", () => {
+  const source = readFileSync(new URL("../ios/PayblastPurchases.swift", import.meta.url), "utf8");
+  const objc = readFileSync(new URL("../ios/PayblastPurchases.m", import.meta.url), "utf8");
+  assert.match(source, /requiresMainQueueSetup\(\) -> Bool \{ false \}/);
+  assert.match(source, /static let `default`: EntitlementVerificationMode = \.enforced/);
+  assert.match(source, /private var verificationMode: EntitlementVerificationMode = \.enforced/);
+  assert.match(source, /if mode == \.enforced \{\s*throw StorePurchaseError\.unverified/s);
+  assert.match(source, /Task\.detached\(priority: \.userInitiated\)/);
+  assert.match(source, /Task\.detached\(priority: \.utility\)/);
+  assert.equal(source.includes("JSONDecoder"), false);
+  assert.match(objc, /setEntitlementVerificationMode:/);
+});
+
+test("Android does not auto-init on the main thread and defers Play Billing", () => {
+  const source = readFileSync(
+    new URL("../android/src/main/java/co/bitscorp/payblast/purchases/PayblastPurchasesModule.kt", import.meta.url),
+    "utf8",
+  );
+  const manifest = readFileSync(new URL("../android/src/main/AndroidManifest.xml", import.meta.url), "utf8");
+  assert.equal(manifest.includes("ContentProvider"), false);
+  assert.equal(manifest.includes("InitializationProvider"), false);
+  assert.equal(manifest.includes("androidx.startup"), false);
+  assert.match(source, /newSingleThreadScheduledExecutor/);
+  assert.match(source, /workExecutor\.execute/);
+  assert.match(source, /ENTITLEMENT_VERIFICATION_MODE_ENFORCED/);
+  assert.match(source, /fun setEntitlementVerificationMode/);
+  assert.match(source, /private fun billingClientLocked\(\): BillingClient/);
+  assert.equal(/private val billingClient: BillingClient = BillingClient\.newBuilder/.test(source), false);
+  assert.equal(/init \{[^}]*startConnection/.test(source), false);
+  assert.equal(/init \{[^}]*BillingClient\.newBuilder/.test(source), false);
+  assert.equal(source.includes("Looper.getMainLooper"), false);
+  assert.match(source, /runOnUiQueueThread/);
+  assert.match(source, /launchBillingFlow/);
+});
