@@ -1,4 +1,5 @@
 import {
+  ENTITLEMENT_VERIFICATION_MODE,
   PURCHASES_ERROR_CODE,
   PurchasesError,
   createClient,
@@ -21,6 +22,7 @@ const client = createClient();
 
 const Purchases = {
   PURCHASES_ERROR_CODE,
+  ENTITLEMENT_VERIFICATION_MODE,
   configure(configuration, appUserID) {
     return client.configure(configuration, appUserID);
   },
@@ -60,6 +62,9 @@ const Purchases = {
   getAppUserID() {
     return client.getAppUserID();
   },
+  getEntitlementVerificationMode() {
+    return client.getEntitlementVerificationMode();
+  },
   addCustomerUpdateListener(listener) {
     return client.addCustomerUpdateListener(listener);
   },
@@ -85,6 +90,7 @@ const Purchases = {
 };
 
 export {
+  ENTITLEMENT_VERIFICATION_MODE,
   PURCHASES_ERROR_CODE,
   PurchasesError,
   createClient,

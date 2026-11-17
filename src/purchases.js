@@ -1,6 +1,13 @@
 import { withTimeout } from "./async.js";
-import { loadNativePurchases, storeFromNative } from "./native.js";
+import { applyEntitlementVerificationMode, loadNativePurchases, storeFromNative } from "./native.js";
 import { pricingFromPackage } from "./prices.js";
+import {
+  DEFAULT_BACKOFF_MS,
+  MAX_BACKOFF_MS,
+  MIN_REFETCH_INTERVAL_MS,
+  createRefetchController,
+  watchReconnect,
+} from "./refetch.js";
 
 export const PURCHASES_ERROR_CODE = {
   PURCHASE_CANCELLED_ERROR: "PURCHASE_CANCELLED_ERROR",
@@ -11,8 +18,15 @@ export const PURCHASES_ERROR_CODE = {
   PRESENTATION_ERROR: "PRESENTATION_ERROR",
 };
 
+export const ENTITLEMENT_VERIFICATION_MODE = {
+  DISABLED: "DISABLED",
+  INFORMATIONAL: "INFORMATIONAL",
+  ENFORCED: "ENFORCED",
+};
+
 const DEFAULT_BASE_URL = "https://payblastfs.com";
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_ENTITLEMENT_VERIFICATION_MODE = ENTITLEMENT_VERIFICATION_MODE.ENFORCED;
 
 export class PurchasesError extends Error {
   constructor(message, code = PURCHASES_ERROR_CODE.STORE_PROBLEM_ERROR) {
@@ -100,13 +114,38 @@ export function createClient({
   presentTimeoutMs = 15_000,
   nativeTimeoutMs = 0,
   locale,
+  scheduleRetry,
+  cancelRetry,
+  now,
+  subscribeAppState,
+  subscribeOnline,
+  offeringsBackoffMs = DEFAULT_BACKOFF_MS,
+  maxOfferingsBackoffMs = MAX_BACKOFF_MS,
+  minOfferingsRefetchMs = MIN_REFETCH_INTERVAL_MS,
 } = {}) {
   let apiKey = null;
   let appUserId = null;
+  let entitlementVerificationMode = DEFAULT_ENTITLEMENT_VERIFICATION_MODE;
+  let stopReconnectWatch = null;
   const listeners = new Set();
+  const offeringsSync = createRefetchController({
+    backoffMs: offeringsBackoffMs,
+    maxBackoffMs: maxOfferingsBackoffMs,
+    minIntervalMs: minOfferingsRefetchMs,
+    now,
+    schedule: scheduleRetry,
+    cancel: cancelRetry,
+    shouldRetry: (error) => error?.code === PURCHASES_ERROR_CODE.NETWORK_ERROR,
+    refreshTask: loadOfferings,
+  });
 
   function notify(customer) {
     for (const listener of listeners) listener(customer);
+  }
+
+  async function loadOfferings() {
+    const body = await request("/v1/offerings");
+    return toOfferings(body, platform, locale);
   }
 
   async function request(path, options = {}) {
@@ -185,8 +224,10 @@ export function createClient({
   return {
     async configure(configuration, legacyAppUserId) {
       const config = normalizeConfiguration(configuration, legacyAppUserId);
+      const verification = verificationModeFrom(config);
       apiKey = config.apiKey;
       appUserId = config.appUserID || anonymousId();
+      entitlementVerificationMode = verification.mode;
       if (config.baseUrl) baseUrl = config.baseUrl.replace(/\/$/, "");
       if (config.platform) platform = config.platform;
       if (config.purchaseStoreProduct) purchaseStoreProduct = config.purchaseStoreProduct;
@@ -196,6 +237,15 @@ export function createClient({
       if (config.requestTimeoutMs != null) requestTimeoutMs = config.requestTimeoutMs;
       if (config.presentTimeoutMs != null) presentTimeoutMs = config.presentTimeoutMs;
       if (config.nativeTimeoutMs != null) nativeTimeoutMs = config.nativeTimeoutMs;
+      const linked = nativeModule === undefined ? loadNativePurchases() : nativeModule;
+      applyEntitlementVerificationMode(linked, verification.mode, { explicit: verification.explicit });
+      if (!stopReconnectWatch) {
+        stopReconnectWatch = watchReconnect({
+          subscribeAppState,
+          subscribeOnline,
+          onReconnect: () => offeringsSync.requestBackgroundRefresh(loadOfferings),
+        });
+      }
     },
     async logIn(nextAppUserId) {
       if (!nextAppUserId || typeof nextAppUserId !== "string") {
@@ -219,8 +269,7 @@ export function createClient({
       return customer;
     },
     async getOfferings() {
-      const body = await request("/v1/offerings");
-      return toOfferings(body, platform, locale);
+      return offeringsSync.run(loadOfferings);
     },
     async getCurrentOfferingForPlacement(placementIdentifier) {
       if (!placementIdentifier || typeof placementIdentifier !== "string") {
@@ -230,9 +279,15 @@ export function createClient({
         );
       }
 
-      const body = await request(`/v1/offerings?placement=${encodeURIComponent(placementIdentifier)}`);
-      const offerings = toOfferings(body, platform, locale);
-      return offeringForPlacement(offerings, placementIdentifier);
+      try {
+        const body = await request(`/v1/offerings?placement=${encodeURIComponent(placementIdentifier)}`);
+        const offerings = toOfferings(body, platform, locale);
+        offeringsSync.notifySuccess();
+        return offeringForPlacement(offerings, placementIdentifier);
+      } catch (error) {
+        offeringsSync.notifyFailure(error);
+        throw error;
+      }
     },
     async purchase(aPackage) {
       const productIdentifier = productIdFor(aPackage, platform);
@@ -349,6 +404,9 @@ export function createClient({
     getAppUserID() {
       return appUserId;
     },
+    getEntitlementVerificationMode() {
+      return entitlementVerificationMode;
+    },
   };
 }
 
@@ -464,6 +522,28 @@ function textFrom(document) {
       return [];
     })
     .join(" ");
+}
+
+function verificationModeFrom(configuration) {
+  const explicit =
+    Boolean(configuration) &&
+    typeof configuration === "object" &&
+    Object.prototype.hasOwnProperty.call(configuration, "entitlementVerificationMode") &&
+    configuration.entitlementVerificationMode != null &&
+    configuration.entitlementVerificationMode !== "";
+  const raw = explicit ? configuration.entitlementVerificationMode : DEFAULT_ENTITLEMENT_VERIFICATION_MODE;
+  const mode = String(raw).toUpperCase();
+  if (
+    mode !== ENTITLEMENT_VERIFICATION_MODE.DISABLED &&
+    mode !== ENTITLEMENT_VERIFICATION_MODE.INFORMATIONAL &&
+    mode !== ENTITLEMENT_VERIFICATION_MODE.ENFORCED
+  ) {
+    throw new PurchasesError(
+      "entitlementVerificationMode must be DISABLED, INFORMATIONAL, or ENFORCED",
+      PURCHASES_ERROR_CODE.CONFIGURATION_ERROR,
+    );
+  }
+  return { mode, explicit };
 }
 
 function normalizeConfiguration(configuration, legacyAppUserId) {

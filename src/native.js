@@ -22,3 +22,14 @@ export function storeFromNative(nativeModule) {
     },
   };
 }
+
+// Only forward a verification mode the app actually set. Sending a JS default
+// would override the native ENFORCED default (RevenueCat RN issue #2127).
+export function applyEntitlementVerificationMode(nativeModule, mode, { explicit } = {}) {
+  if (!explicit) return false;
+  if (!nativeModule || typeof nativeModule.setEntitlementVerificationMode !== "function") {
+    return false;
+  }
+  nativeModule.setEntitlementVerificationMode(mode);
+  return true;
+}

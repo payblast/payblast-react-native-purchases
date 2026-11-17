@@ -2,6 +2,8 @@
 
 @interface RCT_EXTERN_MODULE(PayblastPurchases, NSObject)
 
+RCT_EXTERN_METHOD(setEntitlementVerificationMode:(NSString *)mode)
+
 RCT_EXTERN_METHOD(purchase:(NSString *)productId
                   appUserId:(NSString *)appUserId
                   resolver:(RCTPromiseResolveBlock)resolve
